@@ -1,0 +1,1424 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="CDL Tracker" />
+  <title>CDL Weekly Tracker</title>
+  <style>
+    html, body, #root { margin: 0; min-height: 100%; background: #09090b; }
+    body { overscroll-behavior: none; }
+    * { box-sizing: border-box; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script type="text/babel">
+const { useState, useEffect, useRef } = React;
+
+// ─────────────────────────────────────────────────────────────
+// CONSTANTS
+// ─────────────────────────────────────────────────────────────
+
+const VIOLATIONS = [
+  { id: "red_light",     label: "Red Light",            icon: "🔴" },
+  { id: "yellow_light",  label: "Yellow Light",          icon: "🟡" },
+  { id: "block_transit", label: "Blocking Traffic",      icon: "🚧" },
+  { id: "wrong_exit",    label: "Wrong Exit",            icon: "↩️" },
+  { id: "wide_turning",  label: "Wide Turning",          icon: "↗️" },
+  { id: "tight_turning", label: "Tight Turning",         icon: "↙️" },
+  { id: "hit_curve",     label: "Hit the Curve",         icon: "💥" },
+  { id: "below_15",      label: "Below 15 mph",          icon: "🐢" },
+  { id: "speed_over",    label: "6-7 Over Speed Limit",  icon: "⚡" },
+  { id: "stop_sign",     label: "Stop Sign Violation",   icon: "🛑" },
+  { id: "prev_accident", label: "Preventable Accident",  icon: "💢" },
+  { id: "danger_lane",   label: "Dangerous Lane Change", icon: "🚨" },
+  { id: "near_miss",     label: "Near Miss",             icon: "⚠️" },
+];
+
+const QUICK_COMMENTS = [
+  "Needs more backing practice.",
+  "Needs better mirror usage.",
+  "Misses traffic signs.",
+  "Wrong exit selection.",
+  "Needs more trip planning practice.",
+  "Good attitude and willingness to learn.",
+  "Improves with repetition.",
+  "Needs more miles before upgrade.",
+  "Good backing improvement.",
+  "Needs more work on angle backing.",
+  "Needs more work on straight backing.",
+];
+
+const EVAL_OPTIONS = ["Ready For Upgrade", "Needs More Training", "Not Recommended Yet"];
+const DAYS = ["Day 1", "Day 2", "Day 3", "Day 4", "Day 5", "Day 6", "Day 7"];
+
+// localStorage keys
+const LS_SESSION = "cdl_wt_session_v4";
+const LS_HISTORY = "cdl_wt_history_v4";
+const LS_UI      = "cdl_wt_ui_v4";
+
+// ─────────────────────────────────────────────────────────────
+// DATA FACTORIES
+// ─────────────────────────────────────────────────────────────
+
+function makeDay() {
+  return {
+    violations: Object.fromEntries(VIOLATIONS.map(v => [v.id, 0])),
+    backing: { straight_ok: 0, straight_fail: 0, angle_ok: 0, angle_fail: 0 },
+    notes: "",
+  };
+}
+
+function makeSession() {
+  return {
+    id: String(Date.now()),
+    createdAt: new Date().toISOString(),
+    lastSaved: null,
+    info: {
+      traineeName: "",
+      trainerName: "",
+      startDate: isoDate(),
+      location: "",
+      truckNumber: "",
+    },
+    days: DAYS.map(() => makeDay()),
+    recommendation: "",
+    finalized: false,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────
+// PURE CALCULATIONS
+// ─────────────────────────────────────────────────────────────
+
+function dayVioCount(day) {
+  return Object.values(day.violations).reduce((s, n) => s + n, 0);
+}
+
+function dayBackFails(day) {
+  return (day.backing.straight_fail || 0) + (day.backing.angle_fail || 0);
+}
+
+function dayScore(day) {
+  return dayVioCount(day) + dayBackFails(day);
+}
+
+function weekScore(days) {
+  return days.reduce((s, d) => s + dayScore(d), 0);
+}
+
+function calcBackingStats(days) {
+  let sOk = 0, sFail = 0, aOk = 0, aFail = 0;
+  days.forEach(d => {
+    sOk   += d.backing.straight_ok   || 0;
+    sFail += d.backing.straight_fail || 0;
+    aOk   += d.backing.angle_ok      || 0;
+    aFail += d.backing.angle_fail    || 0;
+  });
+  const sTotal = sOk + sFail;
+  const aTotal = aOk + aFail;
+  return {
+    sAttempts: sTotal,
+    sFails: sFail,
+    sRate: sTotal > 0 ? Math.round((sOk / sTotal) * 100) : null,
+    aAttempts: aTotal,
+    aFails: aFail,
+    aRate: aTotal > 0 ? Math.round((aOk / aTotal) * 100) : null,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────
+// STORAGE HELPERS — never throw, always return fallback
+// ─────────────────────────────────────────────────────────────
+
+function lsRead(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw === null) return fallback;
+    return JSON.parse(raw);
+  } catch {
+    return fallback;
+  }
+}
+
+function lsWrite(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+    return true;
+  } catch (e) {
+    console.warn("localStorage write failed:", e);
+    return false;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// UTILITIES
+// ─────────────────────────────────────────────────────────────
+
+function isoDate() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function formatDateTime(iso) {
+  if (!iso) return "";
+  try {
+    const d = new Date(iso);
+    return (
+      d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) +
+      " " +
+      d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
+    );
+  } catch {
+    return "";
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// DESIGN TOKENS
+// ─────────────────────────────────────────────────────────────
+
+const T = {
+  bg:      "#0c0c10",
+  surface: "#14141c",
+  card:    "#1a1a24",
+  border:  "#22222e",
+  accent:  "#3b82f6",
+  green:   "#22c55e",
+  yellow:  "#eab308",
+  red:     "#ef4444",
+  text:    "#e2e8f0",
+  muted:   "#64748b",
+  dim:     "#8892a4",
+};
+
+const MONO = "'Courier New', Courier, monospace";
+
+const b1 = (col) => `1px solid ${col}`;
+
+// ─────────────────────────────────────────────────────────────
+// ATOMS
+// ─────────────────────────────────────────────────────────────
+
+function Label({ children, style }) {
+  return (
+    <div style={{ fontSize: 9, color: T.muted, letterSpacing: 3, fontWeight: 700, textTransform: "uppercase", ...style }}>
+      {children}
+    </div>
+  );
+}
+
+function Card({ children, style }) {
+  return (
+    <div style={{
+      background: T.card, border: b1(T.border), borderRadius: 12,
+      padding: 14, marginBottom: 10, ...style,
+    }}>
+      {children}
+    </div>
+  );
+}
+
+function TextInput({ label, value, onChange, type = "text", placeholder = "" }) {
+  return (
+    <div style={{ marginBottom: 10 }}>
+      {label && <Label style={{ marginBottom: 4 }}>{label}</Label>}
+      <input
+        type={type}
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        placeholder={placeholder}
+        style={{
+          width: "100%", boxSizing: "border-box",
+          background: T.bg, border: b1(T.border), borderRadius: 8,
+          padding: "9px 11px", color: T.text, fontSize: 13,
+          fontFamily: MONO, outline: "none",
+        }}
+      />
+    </div>
+  );
+}
+
+function SolidBtn({ children, onClick, color, style }) {
+  const bg = color || T.accent;
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        border: "none", borderRadius: 10, cursor: "pointer",
+        fontFamily: MONO, fontWeight: 700, letterSpacing: 1,
+        fontSize: 12, padding: "12px 16px",
+        background: bg, color: "#fff", ...style,
+      }}
+      onPointerDown={e => (e.currentTarget.style.opacity = "0.72")}
+      onPointerUp={e => (e.currentTarget.style.opacity = "1")}
+      onPointerLeave={e => (e.currentTarget.style.opacity = "1")}
+    >
+      {children}
+    </button>
+  );
+}
+
+function OutlineBtn({ children, onClick, style }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        background: T.surface, border: b1(T.border), borderRadius: 10,
+        cursor: "pointer", fontFamily: MONO, fontWeight: 700,
+        letterSpacing: 1, fontSize: 12, padding: "12px 16px",
+        color: T.dim, ...style,
+      }}
+      onPointerDown={e => (e.currentTarget.style.opacity = "0.72")}
+      onPointerUp={e => (e.currentTarget.style.opacity = "1")}
+      onPointerLeave={e => (e.currentTarget.style.opacity = "1")}
+    >
+      {children}
+    </button>
+  );
+}
+
+// Big tappable counter row optimised for one-hand iPhone use
+function CounterRow({ label, icon, count, onInc, onDec, accentColor }) {
+  const ac = accentColor || T.accent;
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", gap: 8,
+      padding: "10px 11px", marginBottom: 7,
+      background: count > 0 ? ac + "18" : T.bg,
+      border: b1(count > 0 ? ac : T.border),
+      borderLeft: `4px solid ${ac}`,
+      borderRadius: 10,
+    }}>
+      <span style={{ fontSize: 17, minWidth: 24, textAlign: "center" }}>{icon}</span>
+      <div style={{
+        flex: 1, fontSize: 12, lineHeight: 1.3,
+        color: count > 0 ? "#fff" : T.dim,
+        fontWeight: count > 0 ? 600 : 400,
+      }}>
+        {label}
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+        {count > 0 && (
+          <button
+            onClick={onDec}
+            style={{
+              background: T.surface, border: "none", borderRadius: 6,
+              color: T.muted, width: 30, height: 30, fontSize: 18,
+              cursor: "pointer", fontFamily: MONO,
+              display: "flex", alignItems: "center", justifyContent: "center",
+            }}
+          >
+            −
+          </button>
+        )}
+        {count > 0 && (
+          <span style={{
+            minWidth: 24, textAlign: "center",
+            fontSize: 17, fontWeight: 900, color: ac,
+          }}>
+            {count}
+          </span>
+        )}
+        <button
+          onClick={onInc}
+          style={{
+            background: ac, border: "none", borderRadius: 10,
+            color: "#fff", width: 46, height: 46, fontSize: 24,
+            cursor: "pointer", fontWeight: 900, fontFamily: MONO,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            boxShadow: `0 0 12px ${ac}50`,
+          }}
+          onPointerDown={e => (e.currentTarget.style.transform = "scale(0.88)")}
+          onPointerUp={e => (e.currentTarget.style.transform = "scale(1)")}
+          onPointerLeave={e => (e.currentTarget.style.transform = "scale(1)")}
+        >
+          +
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// CONFIRM MODAL
+// ─────────────────────────────────────────────────────────────
+
+function ConfirmModal({ title, body, confirmLabel, confirmColor, onConfirm, onCancel }) {
+  return (
+    <div style={{
+      position: "fixed", inset: 0, background: "#000000dd",
+      display: "flex", alignItems: "center", justifyContent: "center",
+      zIndex: 9999, padding: 20,
+    }}>
+      <div style={{
+        background: T.card, border: b1(T.red),
+        borderRadius: 16, padding: 24, maxWidth: 320, width: "100%",
+      }}>
+        <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 8, color: T.text }}>{title}</div>
+        <div style={{ fontSize: 12, color: T.muted, marginBottom: 24, lineHeight: 1.7 }}>{body}</div>
+        <div style={{ display: "flex", gap: 9 }}>
+          <OutlineBtn onClick={onCancel} style={{ flex: 1 }}>Cancel</OutlineBtn>
+          <SolidBtn onClick={onConfirm} color={confirmColor || T.red} style={{ flex: 1, padding: "12px 0" }}>
+            {confirmLabel || "Confirm"}
+          </SolidBtn>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// WEEK CHART
+// ─────────────────────────────────────────────────────────────
+
+function WeekChart({ days }) {
+  const scores = days.map(dayScore);
+  const maxS = Math.max(...scores, 1);
+  const minVal = Math.min(...scores);
+  const maxVal = Math.max(...scores);
+
+  return (
+    <div style={{ display: "flex", alignItems: "flex-end", gap: 6, height: 84, padding: "0 2px" }}>
+      {scores.map((s, i) => {
+        const barH = Math.max(Math.round((s / maxS) * 68), 3);
+        const isBest  = s === minVal;
+        const isWorst = s === maxVal && s > 0 && maxVal > minVal;
+        const col = isBest ? T.green : isWorst ? T.red : T.accent;
+        return (
+          <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}>
+            <div style={{ fontSize: 9, color: s === 0 ? T.muted : col, fontWeight: 700 }}>{s || ""}</div>
+            <div style={{
+              width: "100%", height: barH,
+              background: col, opacity: s === 0 ? 0.15 : 1,
+              borderRadius: "3px 3px 0 0", transition: "height 0.3s",
+            }} />
+            <div style={{ fontSize: 8, color: T.muted }}>D{i + 1}</div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// PDF REPORT
+// ─────────────────────────────────────────────────────────────
+
+function buildReportHTML(session) {
+  const { info, days, recommendation } = session;
+  const scores = days.map(dayScore);
+  const total  = scores.reduce((a, b) => a + b, 0);
+  const bs     = calcBackingStats(days);
+  const bestI  = scores.indexOf(Math.min(...scores));
+  const worstI = scores.indexOf(Math.max(...scores));
+  const recColor =
+    recommendation === "Ready For Upgrade" ? "#16a34a" :
+    recommendation === "Needs More Training" ? "#d97706" : "#dc2626";
+
+  const dayRows = days.map((d, i) => {
+    const vList = VIOLATIONS
+      .filter(v => d.violations[v.id] > 0)
+      .map(v => `${v.label} x${d.violations[v.id]}`)
+      .join(", ") || "None";
+    const hl =
+      i === bestI  ? " style='background:#f0fdf4'" :
+      i === worstI && scores[i] > 0 ? " style='background:#fef2f2'" : "";
+    return `<tr${hl}><td>Day ${i + 1}</td><td>${vList}</td><td align="center">${scores[i]}</td></tr>`;
+  }).join("");
+
+  const noteRows = days
+    .map((d, i) => d.notes ? `<p><b>Day ${i + 1}:</b> ${d.notes}</p>` : "")
+    .join("");
+
+  return `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>CDL Weekly Report - ${info.traineeName}</title>
+<style>
+  body { font-family: 'Courier New', monospace; color: #111; padding: 32px; margin: 0; }
+  h1 { font-size: 20px; border-bottom: 3px solid #111; padding-bottom: 8px; margin-bottom: 4px; }
+  .sub { font-size: 10px; color: #666; letter-spacing: 2px; margin-bottom: 20px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px 20px; margin-bottom: 20px; }
+  .f label { font-size: 9px; color: #888; letter-spacing: 2px; }
+  .f p { margin: 2px 0 0; font-size: 13px; font-weight: 700; }
+  .stats { display: flex; gap: 28px; margin-bottom: 20px; }
+  .stat .num { font-size: 26px; font-weight: 900; }
+  .stat .lbl { font-size: 9px; color: #888; letter-spacing: 2px; }
+  table { width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 12px; }
+  th { background: #111; color: #fff; padding: 7px; text-align: left; }
+  td { padding: 6px 8px; border-bottom: 1px solid #ddd; }
+  .rec { border: 3px solid ${recColor}; border-radius: 8px; padding: 12px 20px; display: inline-block; margin-bottom: 20px; }
+  .rec-label { font-size: 22px; font-weight: 900; color: ${recColor}; }
+  @media print { body { padding: 0; } }
+</style>
+</head>
+<body>
+<h1>🚛 CDL Weekly Training Report</h1>
+<div class="sub">WEEKLY TRAINEE EVALUATION &nbsp;·&nbsp; ${new Date().toLocaleDateString()}</div>
+<div class="grid">
+  <div class="f"><label>TRAINEE</label><p>${info.traineeName || "—"}</p></div>
+  <div class="f"><label>TRAINER</label><p>${info.trainerName || "—"}</p></div>
+  <div class="f"><label>TRUCK #</label><p>${info.truckNumber || "—"}</p></div>
+  <div class="f"><label>START DATE</label><p>${info.startDate || "—"}</p></div>
+  <div class="f"><label>LOCATION</label><p>${info.location || "—"}</p></div>
+</div>
+<div class="stats">
+  <div class="stat"><div class="num" style="color:#3b82f6">${total}</div><div class="lbl">WEEKLY TOTAL</div></div>
+  <div class="stat"><div class="num" style="color:#22c55e">D${bestI + 1} (${scores[bestI]})</div><div class="lbl">BEST DAY</div></div>
+  <div class="stat"><div class="num" style="color:#ef4444">D${worstI + 1} (${scores[worstI]})</div><div class="lbl">WORST DAY</div></div>
+</div>
+<h2 style="font-size:12px;letter-spacing:2px;margin-bottom:8px">DAILY BREAKDOWN</h2>
+<table>
+  <thead><tr><th>Day</th><th>Violations</th><th>Score</th></tr></thead>
+  <tbody>${dayRows}</tbody>
+</table>
+<h2 style="font-size:12px;letter-spacing:2px;margin-bottom:8px">BACKING SKILLS</h2>
+<table>
+  <thead><tr><th>Skill</th><th>Attempts</th><th>Fails</th><th>Success Rate</th></tr></thead>
+  <tbody>
+    <tr><td>Straight Backing</td><td>${bs.sAttempts}</td><td>${bs.sFails}</td><td>${bs.sRate !== null ? bs.sRate + "%" : "—"}</td></tr>
+    <tr><td>Angle Backing</td><td>${bs.aAttempts}</td><td>${bs.aFails}</td><td>${bs.aRate !== null ? bs.aRate + "%" : "—"}</td></tr>
+  </tbody>
+</table>
+${recommendation ? `<div class="rec"><div style="font-size:9px;color:#888;letter-spacing:2px;margin-bottom:4px">TRAINER RECOMMENDATION</div><div class="rec-label">${recommendation}</div></div>` : ""}
+${noteRows ? `<h2 style="font-size:12px;letter-spacing:2px;margin-bottom:8px">TRAINER NOTES</h2>${noteRows}` : ""}
+<div style="margin-top:44px;border-top:1px solid #ccc;padding-top:12px;font-size:9px;color:#aaa;letter-spacing:1px">
+  Generated ${new Date().toLocaleString()} · CDL Weekly Training Tracker
+</div>
+</body>
+</html>`;
+}
+
+function openReport(session) {
+  const w = window.open("", "_blank");
+  if (w) {
+    w.document.write(buildReportHTML(session));
+    w.document.close();
+    w.print();
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// MAIN APP
+// ─────────────────────────────────────────────────────────────
+
+const PAGE = { eval: "eval", summary: "summary", history: "history", detail: "detail" };
+
+function App() {
+
+  // ── Bootstrap from localStorage ─────────────────────────────
+  const [session,   setSessionRaw] = useState(() => lsRead(LS_SESSION, null) || makeSession());
+  const [history,   setHistory]    = useState(() => lsRead(LS_HISTORY, []));
+  const [page,      setPage]       = useState(() => lsRead(LS_UI, {}).page      || PAGE.eval);
+  const [activeDay, setActiveDay]  = useState(() => lsRead(LS_UI, {}).activeDay ?? 0);
+  const [detailId,  setDetailId]   = useState(() => lsRead(LS_UI, {}).detailId  || null);
+  const [modal,     setModal]      = useState(null);
+  const [saveFlash, setSaveFlash]  = useState(false);
+
+  const flashTimer   = useRef(null);
+  const skipFirstRef = useRef(true); // don't double-write on mount
+
+  // ── Auto-save: fires on every session state change ───────────
+  useEffect(() => {
+    if (skipFirstRef.current) {
+      skipFirstRef.current = false;
+      return;
+    }
+    const stamped = { ...session, lastSaved: new Date().toISOString() };
+    lsWrite(LS_SESSION, stamped);
+    setSaveFlash(true);
+    clearTimeout(flashTimer.current);
+    flashTimer.current = setTimeout(() => setSaveFlash(false), 2400);
+  }, [session]);
+
+  // ── Persist navigation state ─────────────────────────────────
+  useEffect(() => {
+    lsWrite(LS_UI, { page, activeDay, detailId });
+  }, [page, activeDay, detailId]);
+
+  // ── Session updater — immutable, triggers auto-save ──────────
+  function updateSession(fn) {
+    setSessionRaw(prev => fn({ ...prev }));
+  }
+
+  // ── Field mutators ───────────────────────────────────────────
+  const setInfoField = key => val =>
+    updateSession(s => { s.info = { ...s.info, [key]: val }; return s; });
+
+  const setDayNote = (di, val) =>
+    updateSession(s => {
+      s.days = s.days.map((d, i) => i === di ? { ...d, notes: val } : d);
+      return s;
+    });
+
+  const incVio = (di, id) =>
+    updateSession(s => {
+      s.days = s.days.map((d, i) =>
+        i !== di ? d : {
+          ...d,
+          violations: { ...d.violations, [id]: (d.violations[id] || 0) + 1 },
+        }
+      );
+      return s;
+    });
+
+  const decVio = (di, id) =>
+    updateSession(s => {
+      s.days = s.days.map((d, i) =>
+        i !== di ? d : {
+          ...d,
+          violations: { ...d.violations, [id]: Math.max(0, (d.violations[id] || 0) - 1) },
+        }
+      );
+      return s;
+    });
+
+  const incBacking = (di, key) =>
+    updateSession(s => {
+      s.days = s.days.map((d, i) =>
+        i !== di ? d : {
+          ...d,
+          backing: { ...d.backing, [key]: (d.backing[key] || 0) + 1 },
+        }
+      );
+      return s;
+    });
+
+  const decBacking = (di, key) =>
+    updateSession(s => {
+      s.days = s.days.map((d, i) =>
+        i !== di ? d : {
+          ...d,
+          backing: { ...d.backing, [key]: Math.max(0, (d.backing[key] || 0) - 1) },
+        }
+      );
+      return s;
+    });
+
+  const setRecommendation = val =>
+    updateSession(s => {
+      s.recommendation = s.recommendation === val ? "" : val;
+      return s;
+    });
+
+  // ── Derived values ───────────────────────────────────────────
+  const dayScores  = session.days.map(dayScore);
+  const totalScore = weekScore(session.days);
+  const bStats     = calcBackingStats(session.days);
+  const bestDay    = dayScores.indexOf(Math.min(...dayScores));
+  const worstDay   = dayScores.indexOf(Math.max(...dayScores));
+  const detailRec  = history.find(h => h.id === detailId) || null;
+
+  const firstHalf  = dayScores.slice(0, 3).reduce((s, n) => s + n, 0);
+  const lastHalf   = dayScores.slice(4).reduce((s, n) => s + n, 0);
+  const trendLabel = lastHalf < firstHalf ? "↓ Improving" : lastHalf > firstHalf ? "↑ Needs Attention" : "→ Stable";
+  const trendColor = lastHalf < firstHalf ? T.green : lastHalf > firstHalf ? T.red : T.dim;
+
+  // ── Actions ──────────────────────────────────────────────────
+  function finalizeWeek() {
+    setModal({
+      title: "Finalize & Archive?",
+      body: `"${session.info.traineeName || "This trainee"}" will be saved to Training History and a fresh session will begin.`,
+      confirmLabel: "Finalize Week",
+      confirmColor: T.green,
+      onConfirm: () => {
+        const now = new Date().toISOString();
+        const archived = { ...session, finalized: true, finalizedAt: now, lastSaved: now };
+        const newHist = [archived, ...history];
+        lsWrite(LS_HISTORY, newHist);
+        setHistory(newHist);
+        const fresh = makeSession();
+        lsWrite(LS_SESSION, fresh);
+        skipFirstRef.current = true;
+        setSessionRaw(fresh);
+        setActiveDay(0);
+        setPage(PAGE.eval);
+        setModal(null);
+      },
+    });
+  }
+
+  function resetEvaluation() {
+    setModal({
+      title: "Reset Evaluation?",
+      body: "Are you sure? This will permanently delete the current trainee record. This cannot be undone.",
+      confirmLabel: "Delete",
+      confirmColor: T.red,
+      onConfirm: () => {
+        const fresh = makeSession();
+        lsWrite(LS_SESSION, fresh);
+        skipFirstRef.current = true;
+        setSessionRaw(fresh);
+        setActiveDay(0);
+        setPage(PAGE.eval);
+        setModal(null);
+      },
+    });
+  }
+
+  function deleteHistoryRecord(id) {
+    setModal({
+      title: "Delete Record?",
+      body: "This will permanently remove this trainee from Training History.",
+      confirmLabel: "Delete",
+      confirmColor: T.red,
+      onConfirm: () => {
+        const newHist = history.filter(h => h.id !== id);
+        lsWrite(LS_HISTORY, newHist);
+        setHistory(newHist);
+        setPage(PAGE.history);
+        setDetailId(null);
+        setModal(null);
+      },
+    });
+  }
+
+  // ── Save badge ───────────────────────────────────────────────
+  const SaveBadge = () => (
+    <div style={{
+      fontSize: 9, letterSpacing: 1, textAlign: "right",
+      color: saveFlash ? T.green : T.muted,
+      transition: "color 0.5s",
+    }}>
+      {saveFlash
+        ? "✓ AUTO SAVED"
+        : session.lastSaved
+          ? `Saved ${formatDateTime(session.lastSaved)}`
+          : "Not yet saved"}
+    </div>
+  );
+
+  // ── Day tab bar ──────────────────────────────────────────────
+  const DayTabBar = () => (
+    <div style={{ display: "flex", gap: 5, marginBottom: 12, overflowX: "auto", paddingBottom: 2 }}>
+      {DAYS.map((_, i) => {
+        const sc  = dayScores[i];
+        const act = i === activeDay;
+        return (
+          <button
+            key={i}
+            onClick={() => setActiveDay(i)}
+            style={{
+              flex: "0 0 auto", padding: "7px 10px", borderRadius: 8, cursor: "pointer",
+              background: act ? T.accent : T.card,
+              border: b1(act ? T.accent : T.border),
+              color: act ? "#fff" : T.dim, fontFamily: MONO,
+              fontSize: 11, letterSpacing: 1,
+              display: "flex", flexDirection: "column", alignItems: "center", gap: 2,
+            }}
+          >
+            <span>D{i + 1}</span>
+            {sc > 0 && (
+              <span style={{ fontSize: 8, color: act ? "#fff" : T.red, fontWeight: 700 }}>{sc}</span>
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+
+  // ── Day panel ────────────────────────────────────────────────
+  const DayPanel = ({ di }) => {
+    const d   = session.days[di];
+    const tot = dayScore(d);
+    const sAtt = (d.backing.straight_ok || 0) + (d.backing.straight_fail || 0);
+    const sOk  = d.backing.straight_ok || 0;
+    const aAtt = (d.backing.angle_ok || 0) + (d.backing.angle_fail || 0);
+    const aOk  = d.backing.angle_ok || 0;
+
+    return (
+      <div>
+        {/* Day score badge */}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+          <Label>{DAYS[di]} — Violations</Label>
+          <div style={{
+            background: tot === 0 ? T.green + "22" : T.red + "22",
+            border: b1(tot === 0 ? T.green : T.red),
+            borderRadius: 20, padding: "3px 11px",
+            fontSize: 11, fontWeight: 700,
+            color: tot === 0 ? T.green : T.red,
+          }}>
+            {tot} {tot === 1 ? "pt" : "pts"}
+          </div>
+        </div>
+
+        {/* Violations */}
+        <Card>
+          {VIOLATIONS.map(v => (
+            <CounterRow
+              key={v.id}
+              label={v.label}
+              icon={v.icon}
+              count={d.violations[v.id] || 0}
+              onInc={() => incVio(di, v.id)}
+              onDec={() => decVio(di, v.id)}
+              accentColor={T.accent}
+            />
+          ))}
+        </Card>
+
+        {/* Backing Skills */}
+        <Card>
+          <Label style={{ marginBottom: 11 }}>Backing Skills</Label>
+
+          <Label style={{ marginBottom: 7, color: "#60a5fa", letterSpacing: 2 }}>Straight Backing</Label>
+          <CounterRow label="Success" icon="✅"
+            count={d.backing.straight_ok || 0}
+            onInc={() => incBacking(di, "straight_ok")}
+            onDec={() => decBacking(di, "straight_ok")}
+            accentColor={T.green}
+          />
+          <CounterRow label="Fail  (+1 pt)" icon="❌"
+            count={d.backing.straight_fail || 0}
+            onInc={() => incBacking(di, "straight_fail")}
+            onDec={() => decBacking(di, "straight_fail")}
+            accentColor={T.red}
+          />
+          {sAtt > 0 && (
+            <div style={{ fontSize: 11, color: T.muted, marginBottom: 12, paddingLeft: 4 }}>
+              Success rate: <span style={{ color: T.green, fontWeight: 700 }}>{Math.round((sOk / sAtt) * 100)}%</span>
+              {" "}({sOk} / {sAtt})
+            </div>
+          )}
+
+          <Label style={{ marginBottom: 7, color: "#60a5fa", letterSpacing: 2 }}>Angle Backing</Label>
+          <CounterRow label="Success" icon="✅"
+            count={d.backing.angle_ok || 0}
+            onInc={() => incBacking(di, "angle_ok")}
+            onDec={() => decBacking(di, "angle_ok")}
+            accentColor={T.green}
+          />
+          <CounterRow label="Fail  (+1 pt)" icon="❌"
+            count={d.backing.angle_fail || 0}
+            onInc={() => incBacking(di, "angle_fail")}
+            onDec={() => decBacking(di, "angle_fail")}
+            accentColor={T.red}
+          />
+          {aAtt > 0 && (
+            <div style={{ fontSize: 11, color: T.muted, paddingLeft: 4 }}>
+              Success rate: <span style={{ color: T.green, fontWeight: 700 }}>{Math.round((aOk / aAtt) * 100)}%</span>
+              {" "}({aOk} / {aAtt})
+            </div>
+          )}
+        </Card>
+
+        {/* Notes */}
+        <Card>
+          <Label style={{ marginBottom: 9 }}>Trainer Notes — {DAYS[di]}</Label>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 9 }}>
+            {QUICK_COMMENTS.map(c => (
+              <button
+                key={c}
+                onClick={() => setDayNote(di, d.notes ? d.notes + " " + c : c)}
+                style={{
+                  background: T.bg, border: b1(T.border), borderRadius: 18,
+                  padding: "4px 10px", color: T.muted, fontSize: 10,
+                  cursor: "pointer", fontFamily: MONO,
+                }}
+              >
+                + {c}
+              </button>
+            ))}
+          </div>
+          <textarea
+            value={d.notes}
+            onChange={e => setDayNote(di, e.target.value)}
+            placeholder="Trainer observations for this day..."
+            rows={3}
+            style={{
+              width: "100%", boxSizing: "border-box",
+              background: T.bg, border: b1(T.border), borderRadius: 8,
+              padding: "9px 11px", color: T.text, fontSize: 12,
+              fontFamily: MONO, outline: "none", resize: "vertical",
+            }}
+          />
+        </Card>
+      </div>
+    );
+  };
+
+  // ─────────────────────────────────────────────────────────────
+  // PAGE: EVALUATION
+  // ─────────────────────────────────────────────────────────────
+  const EvalPage = () => (
+    <div style={{ maxWidth: 640, margin: "0 auto", padding: "13px 12px 0" }}>
+
+      {/* Active trainee banner */}
+      <Card style={{ borderLeft: `4px solid ${session.info.traineeName ? T.accent : T.border}` }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
+          <Label>Current Active Trainee</Label>
+          <SaveBadge />
+        </div>
+        {session.info.traineeName ? (
+          <>
+            <div style={{ fontSize: 17, fontWeight: 700, color: "#fff", marginBottom: 3 }}>
+              {session.info.traineeName}
+            </div>
+            <div style={{ fontSize: 10, color: T.muted }}>
+              {session.info.startDate && `Started ${session.info.startDate}`}
+              {session.info.trainerName && ` · ${session.info.trainerName}`}
+              {session.info.truckNumber && ` · Truck ${session.info.truckNumber}`}
+              {" · "}
+              <span style={{ color: T.accent, fontWeight: 700 }}>{totalScore} pts this week</span>
+            </div>
+          </>
+        ) : (
+          <div style={{ fontSize: 12, color: T.muted, fontStyle: "italic" }}>
+            No active trainee — enter name below to begin
+          </div>
+        )}
+      </Card>
+
+      {/* Trainee info form */}
+      <Card>
+        <Label style={{ marginBottom: 11 }}>Trainee Information</Label>
+        <TextInput label="TRAINEE NAME" value={session.info.traineeName}
+          onChange={setInfoField("traineeName")} placeholder="Full name" />
+        <TextInput label="TRAINER NAME" value={session.info.trainerName}
+          onChange={setInfoField("trainerName")} placeholder="Trainer name" />
+        <div style={{ display: "flex", gap: 9 }}>
+          <div style={{ flex: 1 }}>
+            <TextInput label="START DATE" value={session.info.startDate}
+              onChange={setInfoField("startDate")} type="date" />
+          </div>
+          <div style={{ flex: 1 }}>
+            <TextInput label="TRUCK #" value={session.info.truckNumber}
+              onChange={setInfoField("truckNumber")} placeholder="Unit #" />
+          </div>
+        </div>
+        <TextInput label="LOCATION" value={session.info.location}
+          onChange={setInfoField("location")} placeholder="City / Terminal" />
+      </Card>
+
+      {/* Day tabs + panel */}
+      <DayTabBar />
+      <DayPanel di={activeDay} />
+
+      {/* Trainer recommendation */}
+      <Card>
+        <Label style={{ marginBottom: 11 }}>Trainer Recommendation</Label>
+        {EVAL_OPTIONS.map(opt => {
+          const active = session.recommendation === opt;
+          const col =
+            opt === "Ready For Upgrade" ? T.green :
+            opt === "Needs More Training" ? T.yellow : T.red;
+          return (
+            <button
+              key={opt}
+              onClick={() => setRecommendation(opt)}
+              style={{
+                display: "block", width: "100%", marginBottom: 8,
+                background: active ? col + "22" : T.bg,
+                border: `2px solid ${active ? col : T.border}`,
+                borderRadius: 10, padding: "12px 14px",
+                color: active ? col : T.dim, fontFamily: MONO,
+                fontSize: 12, fontWeight: active ? 700 : 400,
+                cursor: "pointer", textAlign: "left", letterSpacing: 0.5,
+              }}
+            >
+              {active ? "✓ " : ""}{opt}
+            </button>
+          );
+        })}
+      </Card>
+
+      {/* Actions */}
+      <div style={{ display: "flex", gap: 9, marginBottom: 9 }}>
+        <SolidBtn onClick={finalizeWeek} color={T.green}
+          style={{ flex: 2, padding: "13px 0", fontSize: 13 }}>
+          ✅ Finalize Week
+        </SolidBtn>
+        <OutlineBtn onClick={() => openReport(session)}
+          style={{ flex: 1, padding: "13px 0" }}>
+          📄 Report
+        </OutlineBtn>
+      </div>
+      <button
+        onClick={resetEvaluation}
+        style={{
+          width: "100%", background: "transparent",
+          border: b1("#3a1a1a"), borderRadius: 10,
+          color: "#7f1d1d", padding: "12px 0", fontSize: 12,
+          letterSpacing: 2, cursor: "pointer", fontFamily: MONO,
+          fontWeight: 700, marginBottom: 6,
+        }}
+      >
+        🗑 Reset Evaluation
+      </button>
+    </div>
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // PAGE: SUMMARY
+  // ─────────────────────────────────────────────────────────────
+  const SummaryPage = () => (
+    <div style={{ maxWidth: 640, margin: "0 auto", padding: "13px 12px 0" }}>
+
+      <Card style={{ padding: "10px 14px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "#fff" }}>
+            {session.info.traineeName || "No active trainee"}
+          </div>
+          <SaveBadge />
+        </div>
+        {session.info.traineeName && (
+          <div style={{ fontSize: 10, color: T.muted, marginTop: 2 }}>
+            {session.info.startDate}
+            {session.info.trainerName && ` · ${session.info.trainerName}`}
+          </div>
+        )}
+      </Card>
+
+      <Card>
+        <Label style={{ marginBottom: 10 }}>Weekly Performance Chart</Label>
+        <WeekChart days={session.days} />
+      </Card>
+
+      <Card>
+        <Label style={{ marginBottom: 12 }}>Weekly Totals</Label>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+          {[
+            ["TOTAL",  totalScore,                             T.accent],
+            ["BEST",   `D${bestDay  + 1} (${dayScores[bestDay]})`,  T.green],
+            ["WORST",  `D${worstDay + 1} (${dayScores[worstDay]})`, T.red],
+          ].map(([lbl, val, col]) => (
+            <div key={lbl} style={{
+              flex: 1, minWidth: 76, background: T.bg,
+              border: b1(T.border), borderRadius: 8,
+              padding: "9px 6px", textAlign: "center",
+            }}>
+              <Label>{lbl}</Label>
+              <div style={{
+                fontSize: typeof val === "number" ? 26 : 14,
+                fontWeight: 900, color: col, marginTop: 4,
+              }}>{val}</div>
+            </div>
+          ))}
+        </div>
+        <div style={{
+          display: "flex", justifyContent: "space-between", alignItems: "center",
+          background: T.bg, border: b1(T.border), borderRadius: 8, padding: "8px 12px",
+        }}>
+          <Label>Weekly Trend</Label>
+          <span style={{ fontSize: 12, fontWeight: 700, color: trendColor }}>{trendLabel}</span>
+        </div>
+      </Card>
+
+      <Card>
+        <Label style={{ marginBottom: 12 }}>Daily Breakdown</Label>
+        {DAYS.map((_, i) => {
+          const sc  = dayScores[i];
+          const ib  = i === bestDay  && sc === Math.min(...dayScores);
+          const iw  = i === worstDay && sc === Math.max(...dayScores) && sc > 0;
+          return (
+            <div key={i} style={{
+              display: "flex", justifyContent: "space-between", alignItems: "center",
+              padding: "7px 0", borderBottom: b1(T.border),
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ fontSize: 11, color: T.muted, minWidth: 36 }}>Day {i + 1}</span>
+                {ib && <span style={{ fontSize: 8, color: T.green, letterSpacing: 1 }}>BEST</span>}
+                {iw && <span style={{ fontSize: 8, color: T.red,   letterSpacing: 1 }}>WORST</span>}
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+                <div style={{ width: 76, height: 4, background: T.border, borderRadius: 2, overflow: "hidden" }}>
+                  <div style={{
+                    height: "100%",
+                    width: `${Math.min(100, (sc / Math.max(...dayScores, 1)) * 100)}%`,
+                    background: ib ? T.green : iw ? T.red : T.accent,
+                    borderRadius: 2,
+                  }} />
+                </div>
+                <span style={{
+                  fontSize: 13, fontWeight: 700, minWidth: 20, textAlign: "right",
+                  color: sc === 0 ? T.muted : ib ? T.green : iw ? T.red : T.text,
+                }}>
+                  {sc}
+                </span>
+              </div>
+            </div>
+          );
+        })}
+      </Card>
+
+      <Card>
+        <Label style={{ marginBottom: 12 }}>Weekly Backing Statistics</Label>
+        {[
+          { label: "Straight Backing", att: bStats.sAttempts, fails: bStats.sFails, rate: bStats.sRate },
+          { label: "Angle Backing",    att: bStats.aAttempts, fails: bStats.aFails, rate: bStats.aRate },
+        ].map(r => (
+          <div key={r.label} style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: 12, color: T.text, marginBottom: 6 }}>{r.label}</div>
+            <div style={{ display: "flex", gap: 7 }}>
+              {[
+                ["ATT",   r.att,                                T.accent],
+                ["FAILS", r.fails,                              T.red],
+                ["RATE",  r.rate !== null ? r.rate + "%" : "—", T.green],
+              ].map(([l, v, col]) => (
+                <div key={l} style={{
+                  flex: 1, background: T.bg, border: b1(T.border),
+                  borderRadius: 7, padding: "7px 4px", textAlign: "center",
+                }}>
+                  <Label>{l}</Label>
+                  <div style={{ fontSize: 16, fontWeight: 800, color: col, marginTop: 3 }}>{v}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </Card>
+
+      {session.recommendation && (() => {
+        const col =
+          session.recommendation === "Ready For Upgrade" ? T.green :
+          session.recommendation === "Needs More Training" ? T.yellow : T.red;
+        return (
+          <Card>
+            <Label style={{ marginBottom: 8 }}>Trainer Recommendation</Label>
+            <div style={{
+              background: col + "22", border: `2px solid ${col}`,
+              borderRadius: 10, padding: "11px 14px",
+              fontSize: 13, fontWeight: 700, color: col,
+            }}>
+              ✓ {session.recommendation}
+            </div>
+          </Card>
+        );
+      })()}
+
+      <div style={{ display: "flex", gap: 9, marginBottom: 16 }}>
+        <SolidBtn onClick={finalizeWeek} color={T.green} style={{ flex: 2, padding: "13px 0" }}>
+          ✅ Finalize Week
+        </SolidBtn>
+        <OutlineBtn onClick={() => openReport(session)} style={{ flex: 1, padding: "13px 0" }}>
+          📄 Report
+        </OutlineBtn>
+      </div>
+    </div>
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // PAGE: TRAINING HISTORY
+  // ─────────────────────────────────────────────────────────────
+  const HistoryPage = () => (
+    <div style={{ maxWidth: 640, margin: "0 auto", padding: "13px 12px 0" }}>
+      <Label style={{ marginBottom: 12 }}>Training History ({history.length})</Label>
+
+      {history.length === 0 && (
+        <div style={{ textAlign: "center", marginTop: 64, lineHeight: 2.5 }}>
+          <div style={{ fontSize: 34, marginBottom: 8 }}>📁</div>
+          <div style={{ fontSize: 12, color: T.muted, letterSpacing: 1 }}>No finalized records yet</div>
+          <div style={{ fontSize: 10, color: T.border, letterSpacing: 1 }}>
+            Complete a week and press Finalize Week to archive
+          </div>
+        </div>
+      )}
+
+      {history.map(s => {
+        const wt = weekScore(s.days);
+        const rc =
+          s.recommendation === "Ready For Upgrade"  ? T.green  :
+          s.recommendation === "Needs More Training" ? T.yellow :
+          s.recommendation                           ? T.red    : T.dim;
+        return (
+          <div
+            key={s.id}
+            onClick={() => { setDetailId(s.id); setPage(PAGE.detail); }}
+            style={{
+              background: T.card, border: b1(T.border), borderRadius: 12,
+              padding: 14, marginBottom: 10, cursor: "pointer",
+              borderLeft: `4px solid ${rc}`,
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+              <div>
+                <div style={{ fontSize: 14, fontWeight: 700, color: "#fff" }}>
+                  {s.info.traineeName || "Unknown Trainee"}
+                </div>
+                <div style={{ fontSize: 10, color: T.muted, marginTop: 2 }}>
+                  {s.info.startDate}{s.info.location ? ` · ${s.info.location}` : ""}
+                </div>
+                <div style={{ fontSize: 10, color: T.muted, marginTop: 1 }}>
+                  {s.info.trainerName ? `Trainer: ${s.info.trainerName}` : ""}
+                  {s.info.truckNumber ? ` · Truck ${s.info.truckNumber}` : ""}
+                </div>
+                {s.finalizedAt && (
+                  <div style={{ fontSize: 9, color: T.border, marginTop: 3 }}>
+                    Archived {formatDateTime(s.finalizedAt)}
+                  </div>
+                )}
+              </div>
+              <div style={{ textAlign: "right" }}>
+                <div style={{ fontSize: 22, fontWeight: 900, color: T.accent }}>{wt}</div>
+                <div style={{ fontSize: 9, color: rc, letterSpacing: 1, fontWeight: 700 }}>
+                  {s.recommendation || "No eval"}
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // PAGE: RECORD DETAIL
+  // ─────────────────────────────────────────────────────────────
+  const DetailPage = () => {
+    if (!detailRec) {
+      return (
+        <div style={{ maxWidth: 640, margin: "0 auto", padding: "16px 12px 0" }}>
+          <button
+            onClick={() => setPage(PAGE.history)}
+            style={{ background: "transparent", border: "none", color: T.accent, cursor: "pointer", fontFamily: MONO, fontSize: 12, padding: 0 }}
+          >
+            ← Back
+          </button>
+        </div>
+      );
+    }
+
+    const s   = detailRec;
+    const wt  = weekScore(s.days);
+    const dt  = s.days.map(dayScore);
+    const dbs = calcBackingStats(s.days);
+    const rc  =
+      s.recommendation === "Ready For Upgrade"  ? T.green  :
+      s.recommendation === "Needs More Training" ? T.yellow :
+      s.recommendation                           ? T.red    : T.dim;
+
+    return (
+      <div style={{ maxWidth: 640, margin: "0 auto", padding: "13px 12px 0" }}>
+        <button
+          onClick={() => { setPage(PAGE.history); setDetailId(null); }}
+          style={{
+            background: "transparent", border: "none", color: T.accent,
+            fontSize: 12, cursor: "pointer", fontFamily: MONO, marginBottom: 12, padding: 0,
+          }}
+        >
+          ← Back to History
+        </button>
+
+        <Card>
+          <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 3 }}>
+            {s.info.traineeName || "Unknown"}
+          </div>
+          <div style={{ fontSize: 10, color: T.muted, marginBottom: 12 }}>
+            {s.info.startDate}
+            {s.info.location    ? ` · ${s.info.location}`              : ""}
+            {s.info.trainerName ? ` · Trainer: ${s.info.trainerName}`  : ""}
+            {s.info.truckNumber ? ` · Truck: ${s.info.truckNumber}`    : ""}
+          </div>
+          <WeekChart days={s.days} />
+          <div style={{ marginTop: 12, display: "flex", gap: 9 }}>
+            <div style={{
+              flex: 1, background: T.bg, border: b1(T.border),
+              borderRadius: 8, padding: "9px", textAlign: "center",
+            }}>
+              <Label>Weekly Total</Label>
+              <div style={{ fontSize: 26, fontWeight: 900, color: T.accent, marginTop: 3 }}>{wt}</div>
+            </div>
+            {s.recommendation && (
+              <div style={{
+                flex: 2, background: rc + "22", border: `2px solid ${rc}`,
+                borderRadius: 8, padding: "9px",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                fontSize: 11, fontWeight: 700, color: rc,
+              }}>
+                ✓ {s.recommendation}
+              </div>
+            )}
+          </div>
+        </Card>
+
+        <Card>
+          <Label style={{ marginBottom: 11 }}>Daily Scores</Label>
+          {dt.map((sc, i) => (
+            <div key={i} style={{
+              display: "flex", justifyContent: "space-between",
+              padding: "6px 0", borderBottom: b1(T.border),
+            }}>
+              <span style={{ fontSize: 12, color: T.muted }}>Day {i + 1}</span>
+              <span style={{ fontSize: 13, fontWeight: 700, color: sc === 0 ? T.muted : T.text }}>
+                {sc} pts
+              </span>
+            </div>
+          ))}
+        </Card>
+
+        <Card>
+          <Label style={{ marginBottom: 11 }}>Backing Statistics</Label>
+          {[
+            { l: "Straight", att: dbs.sAttempts, f: dbs.sFails, r: dbs.sRate },
+            { l: "Angle",    att: dbs.aAttempts, f: dbs.aFails, r: dbs.aRate },
+          ].map(b => (
+            <div key={b.l} style={{
+              display: "flex", justifyContent: "space-between",
+              padding: "6px 0", borderBottom: b1(T.border),
+            }}>
+              <span style={{ fontSize: 12, color: T.muted }}>{b.l} Backing</span>
+              <span style={{ fontSize: 12, color: T.text }}>
+                {b.att} attempts
+                {b.r !== null && (
+                  <> · <span style={{ color: T.green, fontWeight: 700 }}>{b.r}%</span></>
+                )}
+              </span>
+            </div>
+          ))}
+        </Card>
+
+        {s.days.some(d => d.notes) && (
+          <Card>
+            <Label style={{ marginBottom: 11 }}>Trainer Notes</Label>
+            {s.days.map((d, i) =>
+              d.notes ? (
+                <div key={i} style={{ marginBottom: 8 }}>
+                  <span style={{ fontSize: 10, color: T.accent, letterSpacing: 1 }}>DAY {i + 1} </span>
+                  <span style={{ fontSize: 12, color: T.dim }}>{d.notes}</span>
+                </div>
+              ) : null
+            )}
+          </Card>
+        )}
+
+        <div style={{ display: "flex", gap: 9, marginBottom: 16 }}>
+          <SolidBtn onClick={() => openReport(s)} style={{ flex: 1, padding: "13px 0" }}>
+            📄 Generate Report
+          </SolidBtn>
+          <button
+            onClick={() => deleteHistoryRecord(s.id)}
+            style={{
+              background: "transparent", border: b1("#3a1a1a"),
+              borderRadius: 10, color: "#7f1d1d",
+              padding: "13px 18px", fontSize: 12,
+              cursor: "pointer", fontFamily: MONO,
+            }}
+          >
+            🗑
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  // ─────────────────────────────────────────────────────────────
+  // ROOT RENDER
+  // ─────────────────────────────────────────────────────────────
+
+  const isOnHistory = page === PAGE.history || page === PAGE.detail;
+
+  return (
+    <div style={{
+      minHeight: "100vh", background: T.bg,
+      fontFamily: MONO, color: T.text, paddingBottom: 74,
+    }}>
+
+      {/* ── Header ── */}
+      <div style={{
+        background: T.surface, borderBottom: b1(T.border),
+        padding: "11px 14px", position: "sticky", top: 0, zIndex: 200,
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{ fontSize: 19 }}>🚛</span>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "#fff", letterSpacing: 1 }}>
+              CDL WEEKLY TRACKER
+            </div>
+            <div style={{ fontSize: 8, color: T.muted, letterSpacing: 2 }}>
+              {page === PAGE.eval    ? "EVALUATION"       :
+               page === PAGE.summary ? "WEEKLY SUMMARY"   :
+               page === PAGE.history ? "TRAINING HISTORY" : "RECORD DETAIL"}
+            </div>
+          </div>
+        </div>
+        <div style={{ textAlign: "right" }}>
+          {(page === PAGE.eval || page === PAGE.summary) && (
+            <div style={{
+              background: T.accent + "22", border: b1(T.accent),
+              borderRadius: 20, padding: "3px 11px",
+              fontSize: 11, fontWeight: 700, color: T.accent, marginBottom: 3,
+            }}>
+              {totalScore} PTS
+            </div>
+          )}
+          <div style={{
+            fontSize: 8, letterSpacing: 1,
+            color: saveFlash ? T.green : T.muted,
+            transition: "color 0.5s",
+          }}>
+            {saveFlash
+              ? "✓ AUTO SAVED"
+              : session.lastSaved
+                ? `Saved ${formatDateTime(session.lastSaved)}`
+                : ""}
+          </div>
+        </div>
+      </div>
+
+      {/* ── Page content ── */}
+      {page === PAGE.eval    && <EvalPage />}
+      {page === PAGE.summary && <SummaryPage />}
+      {page === PAGE.history && <HistoryPage />}
+      {page === PAGE.detail  && <DetailPage />}
+
+      {/* ── Bottom tab bar ── */}
+      <div style={{
+        position: "fixed", bottom: 0, left: 0, right: 0,
+        background: T.surface, borderTop: b1(T.border),
+        display: "flex", zIndex: 200,
+      }}>
+        {[
+          [PAGE.eval,    "📋", "EVAL"],
+          [PAGE.summary, "📊", "SUMMARY"],
+          [PAGE.history, "📁", `HISTORY${history.length > 0 ? ` (${history.length})` : ""}`],
+        ].map(([pg, ico, lbl]) => {
+          const active = page === pg || (pg === PAGE.history && isOnHistory);
+          return (
+            <button
+              key={pg}
+              onClick={() => setPage(pg)}
+              style={{
+                flex: 1, padding: "11px 0", textAlign: "center",
+                fontSize: 9, letterSpacing: 2, cursor: "pointer",
+                background: "none", border: "none", fontFamily: MONO,
+                color: active ? "#fff" : T.muted,
+                borderTop: active ? `2px solid ${T.accent}` : "2px solid transparent",
+              }}
+            >
+              <div style={{ fontSize: 16, marginBottom: 1 }}>{ico}</div>
+              <div>{lbl}</div>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* ── Modal ── */}
+      {modal && (
+        <ConfirmModal
+          title={modal.title}
+          body={modal.body}
+          confirmLabel={modal.confirmLabel}
+          confirmColor={modal.confirmColor}
+          onConfirm={modal.onConfirm}
+          onCancel={() => setModal(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App />);
+
+  </script>
+</body>
+</html>
